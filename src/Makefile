@@ -28,11 +28,12 @@ endif
 #******************************************************************
 #                     for GUP version, CUDA 
 # CUDA code generation flags
-GENCODE_SM10    := -gencode arch=compute_10,code=sm_10
-GENCODE_SM10    := -gencode arch=compute_11,code=sm_11
-GENCODE_SM20    := -gencode arch=compute_20,code=sm_20
-GENCODE_SM30    := -gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35
-GENCODE_FLAGS   := $(GENCODE_SM10) $(GENCODE_SM20) $(GENCODE_SM30)
+#GENCODE_SM10    := -gencode arch=compute_10,code=sm_10
+#GENCODE_SM10    := -gencode arch=compute_11,code=sm_11
+#GENCODE_SM20    := -gencode arch=compute_20,code=sm_20
+#GENCODE_SM30    := -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61
+GENCODE_SM60    := -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61
+GENCODE_FLAGS   := $(GENCODE_SM60)
 # Location of the CUDA Toolkit binaries and libraries
 #modify it if necessary
 #CUDA_PATH       ?= /usr/local/cuda-5.0
@@ -131,24 +132,25 @@ PRESTOOBJS = amoeba.o atwood.o barycenter.o birdzap.o cand_output.o\
 	rzinterp.o rzwinterp.o select.o sorter.o swapendian.o\
 	transpose.o twopass.o twopass_real_fwd.o\
 	twopass_real_inv.o vectors.o multifiles.o mask.o\
-	fitsfile.o hget.o hput.o imio.o accel_utils_gpu.o
+	fitsfile.o hget.o hput.o imio.o accel_utils_gpu.o gpu.o 
 
 INSTRUMENTOBJS = multibeam.o bpp.o gmrt.o spigot.o sigproc_fb.o\
-	wapp.o wapp_head_parse.o wapp_y.tab.o psrfits.o
+	wapp.o wapp_head_parse.o wapp_y.tab.o psrfits.o\
+	chkio.o mask.o vectors.o
 
 PLOT2DOBJS = powerplot.o xyline.o
 
-BINARIES = makedata makeinf mjd2cal realfft quicklook\
+BINARIES = prepsubband makedata makeinf mjd2cal realfft quicklook\
 	search_bin search_rzw swap_endian prepdata\
 	check_parkes_raw bary shiftdata dftfold\
 	patchdata readfile toas2dat taperaw\
-	accelsearch prepsubband cal2mjd split_parkes_beams\
+	accelsearch cal2mjd split_parkes_beams\
 	dat2sdat sdat2dat downsample rednoise un_sc_td bincand\
 	dump_spigot_zerolag spigot2filterbank\
 	spigotSband2filterbank GBT350filterbank\
 	psrorbit window plotbincand prepfold show_pfd\
 	rfifind zapbirds explorefft exploredat\
-	weight_psrfits fitsdelrow fitsdelcol psrfits_dumparrays
+	weight_psrfits fitsdelrow fitsdelcol psrfits_dumparrays 
 
 all: libpresto slalib binaries
 
@@ -164,7 +166,13 @@ prep:
 
 accel_utils_gpu.o:	accel_utils_gpu.cu	  
 	$(NVCC) $(EXTRA_NVCCFLAGS) $(NVCCFLAGS) $(CUDA_INC_PATH)  $(GENCODE_FLAGS) -o $@ -c $<
+
+gpu.o:	gpu.cu
+	$(NVCC) $(EXTRA_NVCCFLAGS) $(NVCCFLAGS) $(CUDA_INC_PATH) $(GENCODE_FLAGS) -o $@ -c $<
 	
+#prepsubband_gpu.o:	prepsubband_gpu.cu
+#	$(NVCC) $(EXTRA_NVCCFLAGS) $(NVCCFLAGS) $(CUDA_INC_PATH) $(GENCODE_FLAGS) -o $@ -c $<
+
 makewisdom:
 	$(CC) $(CLINKFLAGS) -o $@ makewisdom.c $(FFTLINK) $(DMALLOCLINK) -lm
 	./makewisdom
@@ -245,8 +253,8 @@ rfifind: rfifind_cmd.c rfifind_cmd.o rfifind.o rfi_utils.o rfifind_plot.o range_
 prepdata: prepdata_cmd.c prepdata_cmd.o prepdata.o $(INSTRUMENTOBJS)
 	$(CC) $(CLINKFLAGS) -o $(PRESTO)/bin/$@ prepdata.o prepdata_cmd.o $(INSTRUMENTOBJS) $(PRESTOLINK) -lcfitsio -lm
 
-prepsubband: prepsubband_cmd.c prepsubband_cmd.o prepsubband.o $(INSTRUMENTOBJS)
-	$(CC) $(CLINKFLAGS) -o $(PRESTO)/bin/$@ prepsubband.o prepsubband_cmd.o $(INSTRUMENTOBJS) $(PRESTOLINK) -lcfitsio -lm
+prepsubband:  gpu.o prepsubband_cmd.c prepsubband_cmd.o prepsubband.o $(INSTRUMENTOBJS)
+	$(CC) $(CLINKFLAGS) -o $(PRESTO)/bin/$@  gpu.o prepsubband.o prepsubband_cmd.o $(INSTRUMENTOBJS) $(PRESTOLINK) -lcfitsio -lm $(CUDA_LINK_EXTRA_FLAGS)
 
 prepfold: prepfold_cmd.c prepfold_cmd.o prepfold.o prepfold_utils.o prepfold_plot.o least_squares.o polycos.o readpar.o $(INSTRUMENTOBJS) $(PLOT2DOBJS)
 	$(FC) $(FLINKFLAGS) -o $(PRESTO)/bin/$@ prepfold.o prepfold_utils.o prepfold_plot.o prepfold_cmd.o least_squares.o polycos.o readpar.o $(PLOT2DOBJS) $(INSTRUMENTOBJS) $(LAPACKLINK) $(PRESTOLINK) $(PGPLOTLINK) -lcfitsio -lm
@@ -266,7 +274,7 @@ spigotSband2filterbank: spigotSband2filterbank.o spigot.o sigproc_fb.o
 show_pfd: show_pfd_cmd.c show_pfd.o show_pfd_cmd.o prepfold_utils.o prepfold_plot.o least_squares.o range_parse.o $(PLOT2DOBJS)
 	$(FC) $(FLINKFLAGS) -o $(PRESTO)/bin/$@ show_pfd.o show_pfd_cmd.o prepfold_utils.o prepfold_plot.o least_squares.o range_parse.o $(PLOT2DOBJS) $(LAPACKLINK) $(PRESTOLINK) $(PGPLOTLINK) -lm
 
-makedata: com.o randlib.o makedata.o
+makedata: com.o randlib.o makedata.o  
 	$(CC) $(CLINKFLAGS) -o $(PRESTO)/bin/$@ com.o randlib.o makedata.o $(PRESTOLINK) -lm
 
 makeinf: makeinf.o ioinf.o
@@ -343,7 +351,6 @@ fitsdelrow: fitsdelrow.o
 
 fitsdelcol: fitsdelcol.o
 	$(CC) $(CLINKFLAGS) -o $(PRESTO)/bin/$@ fitsdelcol.o $(OTHERLIBDIR) -lcfitsio -lm
-
 
 clean:
 	rm -f *.o *~ *#

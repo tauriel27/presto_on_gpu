@@ -10,6 +10,8 @@
 #include "spigot.h"
 #include "sigproc_fb.h"
 #include "psrfits.h"
+#include "misc_utils.c"
+#include "time.h"
 
 #define RAWDATA (cmd->pkmbP || cmd->bcpmP || cmd->wappP || cmd->gmrtP || cmd->spigotP || cmd->filterbankP || cmd->psrfitsP)
 
@@ -23,7 +25,18 @@
 /* x.5s get rounded away from zero.                */
 #define NEAREST_INT(x) (int) (x < 0 ? ceil(x - 0.5) : floor(x + 0.5))
 
+// From CLIG 
+static int insubs = 0;
+static Cmdline *cmd;
+static IFs ifs = SUMIFS;
+
+#ifdef USEDMALLOC
+#include "dmalloc.h"
+#endif
+float read_time = 0;
+float dm_gpu_time = 0;
 static void write_data(FILE * outfiles[], int numfiles, float **outdata,
+
                        int startpoint, int numtowrite);
 static void write_subs(FILE * outfiles[], int numfiles, short **subsdata,
                        int startpoint, int numtowrite);
@@ -41,14 +54,15 @@ static void update_infodata(infodata * idata, int datawrote, int padwrote,
                             int *barybins, int numbarybins, int downsamp);
 static void print_percent_complete(int current, int number);
 
-/* From CLIG */
-static int insubs = 0;
-static Cmdline *cmd;
-static IFs ifs = SUMIFS;
+extern void select_cuda_dev(int cuda_inds);
 
-#ifdef USEDMALLOC
-#include "dmalloc.h"
-#endif
+extern int get_data_gpu(int downsamp, int numdims, int nsub,  FILE * infiles[], int numfiles, float **outdata,
+                 int numchan, int blocklen, int blocksperread,
+                 mask * obsmask, float *padvals, double dt,
+                 double *dispdts, int **offsets, int *padding, short **subsdata);
+void dm_gpu(int numchan, int worklen, int downsamp, int numdms, float *currentdsdata, float *lastdsdata, int dsworklen, int nsub, int **offsets, float **outdata, float  *kernel_time);
+
+
 
 int main(int argc, char *argv[])
 {
@@ -474,7 +488,7 @@ int main(int argc, char *argv[])
       totnumtowrite = cmd->numout;
    else
       totnumtowrite = (int) idata.N / cmd->downsamp;
-
+float p1 = clock();
    if (cmd->nobaryP) {          /* Main loop if we are not barycentering... */
 
       /* Dispersion delays (in bins).  The high freq gets no delay   */
@@ -484,7 +498,7 @@ int main(int argc, char *argv[])
                                      idata.freq, idata.chan_wid, 0.0);
       for (ii = 0; ii < numchan; ii++)
          dispdt[ii] /= idata.dt;
-
+float q1 = clock();
       /* The subband dispersion delays (see note above) */
 
       offsets = gen_imatrix(cmd->numdms, cmd->nsub);
@@ -498,7 +512,8 @@ int main(int argc, char *argv[])
             offsets[ii][jj] = NEAREST_INT((subdispdt[jj] - dtmp) / dsdt);
          vect_free(subdispdt);
       }
-
+float q2 = clock();
+printf("\n\n\n ************* The subband dispersion delays = %.4f\n\n\n", (q2-q1)/CLOCKS_PER_SEC);
       /* Allocate our data array and start getting data */
 
       printf("De-dispersing using:\n");
@@ -518,6 +533,26 @@ int main(int argc, char *argv[])
                          numchan, blocklen, blocksperread,
                          &obsmask, padvals, idata.dt, dispdt,
                          offsets, &padding, subsdata);
+float q3 = clock();
+printf("\n\n\n ***********Allocate our data array and start getting data = %.4f\n\n\n", (q3-q2)/CLOCKS_PER_SEC);
+      int get_data_c = 0;
+printf("\n\n *****worklen = %d\n\n",worklen);
+
+float ss = 0;
+// int numread, worklen, cmd->downsamp, totwrote, totnumtowrite, cmd->numout, cmd->nsub, padding, statnum, numinfiles, numchan, blocklen, blocksperread, 
+// cmd->numoutP, cmd->subP
+// FILE **infiles, **outfiles
+// short **subsdata, 
+// float **outdata, *padvals
+// double min, max, avg, var
+// mask obsmask
+// double idata.dt (infodata idata)
+// double *dispdt
+// int **offsets
+	if(cmd->cudaP){
+	printf("\nTry to use a GPU to run the dedispersion\n");
+	
+	select_cuda_dev(cmd->cuda);
 
       while (numread == worklen) {
 
@@ -548,13 +583,79 @@ int main(int argc, char *argv[])
 
          if (cmd->numoutP && (totwrote == cmd->numout))
             break;
-
-         numread = get_data(infiles, numinfiles, outdata,
+	get_data_c += 1;
+float w1 = clock();
+/*
+worklen = blocklen * blocksperread;
+dsworklen = worklen / cmd->downsamp;
+*/
+//printf("\n\n\n************* blocklen = %d  blocksperread = %d  worklen = %d\n\n\n",blocklen,blocksperread,blocklen * blocksperread);
+	int gput_flag = 1;
+	numread = get_data(infiles, numinfiles, outdata,
                             numchan, blocklen, blocksperread,
                             &obsmask, padvals, idata.dt, dispdt,
                             offsets, &padding, subsdata);
+float w2 = clock();
+ss += (w2-w1)/CLOCKS_PER_SEC;
       }
+}else{
+printf("\nTry to use a CPU to run the dedispersion\n");
+ while (numread == worklen) {
+
+         numread /= cmd->downsamp;
+         print_percent_complete(totwrote, totnumtowrite);
+
+         /* Write the latest chunk of data, but don't   */
+         /* write more than cmd->numout points.         */
+
+         numtowrite = numread;
+         if (cmd->numoutP && (totwrote + numtowrite) > cmd->numout)
+            numtowrite = cmd->numout - totwrote;
+         if (cmd->subP)
+            write_subs(outfiles, cmd->nsub, subsdata, 0, numtowrite);
+         else
+            write_data(outfiles, cmd->numdms, outdata, 0, numtowrite);
+         totwrote += numtowrite;
+
+         /* Update the statistics */
+
+         if (!padding && !cmd->subP) {
+            for (ii = 0; ii < numtowrite; ii++)
+               update_stats(statnum + ii, outdata[0][ii], &min, &max, &avg, &var);
+            statnum += numtowrite;
+         }
+
+         /* Stop if we have written out all the data we need to */
+
+         if (cmd->numoutP && (totwrote == cmd->numout))
+            break;
+	get_data_c += 1;
+float w1 = clock();
+/*
+worklen = blocklen * blocksperread;
+dsworklen = worklen / cmd->downsamp;
+*/
+//printf("\n\n\n************* blocklen = %d  blocksperread = %d  worklen = %d\n\n\n",blocklen,blocksperread,blocklen * blocksperread);
+	int gpu_flag = 0;
+	numread = get_data(infiles, numinfiles, outdata,
+                            numchan, blocklen, blocksperread,
+                            &obsmask, padvals, idata.dt, dispdt,
+                            offsets, &padding, subsdata);
+float w2 = clock();
+ss += (w2-w1)/CLOCKS_PER_SEC;
+      }
+}
+
       datawrote = totwrote;
+	printf("\n\nget_data sum = %d\n\n",get_data_c);
+printf("\n\n\n*****************read_time = %.4f\n\n\n",read_time);
+printf("\n\n\n******************dm_gpu_time = %.4f\n\n\n",dm_gpu_time);
+printf("\n\n\n*****************get_data time = %.4f \n\n\n",ss);
+float q4 = clock();
+printf("\n\n\n **************** numread==worklen loop = %.4f\n\n\n",(q4-q3)/CLOCKS_PER_SEC);
+
+float p2 = clock();
+printf("\n\n\n ********** main loop = %.4f\n\n\n", (p2-p1)/CLOCKS_PER_SEC);
 
    } else {                     /* Main loop if we are barycentering... */
       double maxvoverc = -1.0, minvoverc = 1.0, *voverc = NULL;
@@ -1044,6 +1145,7 @@ static int get_data(FILE * infiles[], int numfiles, float **outdata,
    static float *currentdata, *lastdata, *currentdsdata, *lastdsdata;
    static double blockdt;
    int totnumread = 0, numread = 0, ii, jj, tmppad = 0, nummasked = 0;
+float c1 = clock();
 
    if (firsttime) {
       if (cmd->maskfileP)
@@ -1064,7 +1166,8 @@ static int get_data(FILE * infiles[], int numfiles, float **outdata,
             }
          }
       }
-
+float c2 = clock();
+//printf("\n\n\n ********Make sure that out working blocks are long enough = %.4f\n\n\n",(c2-c1)/CLOCKS_PER_SEC);
       blocksize = blocklen * cmd->nsub;
       blockdt = blocklen * dt;
       data1 = gen_fvect(cmd->nsub * worklen);
@@ -1081,6 +1184,8 @@ static int get_data(FILE * infiles[], int numfiles, float **outdata,
          lastdsdata = data2;
       }
    }
+
+float c3 = clock();
    while (1) {
       if (RAWDATA || insubs) {
          for (ii = 0; ii < blocksperread; ii++) {
@@ -1136,6 +1241,10 @@ static int get_data(FILE * infiles[], int numfiles, float **outdata,
                *padding = 1;
          }
       }
+float c4 = clock();
+read_time += (c4-c3)/CLOCKS_PER_SEC;
+//printf("\n\n\n *************read_PSRFITS_subbands = %.4f\n\n\n",(c4-c3)/CLOCKS_PER_SEC);
+
       /* Downsample the subband data if needed */
       if (cmd->downsamp > 1) {
          int kk, offset, dsoffset, index, dsindex;
@@ -1163,12 +1272,37 @@ static int get_data(FILE * infiles[], int numfiles, float **outdata,
       } else
          break;
    }
+
    if (!cmd->subP) {
+
+float cc = clock();
+
+if(!cmd->cudaP){
+
       for (ii = 0; ii < cmd->numdms; ii++)
          float_dedisp(currentdsdata, lastdsdata, dsworklen,
                       cmd->nsub, offsets[ii], 0.0, outdata[ii]);
+}else{
+float c5 = clock();
+dm_gpu_time += (c5-cc)/CLOCKS_PER_SEC;
+
+//for(int i = 0; i < cmd->nsub*worklen; i++)
+//printf("\n currentdsdata = %.1f lastdsdata= %.1f \n", currentdsdata[i],lastdsdata[i]);
+//printf("\n\n\n worklen = %d \ndsworklen = %d \n nsub = %d \n numchan = %d\n worklen = %d \n downsamp = %d \n numdms = %d \n",worklen,dsworklen,cmd->nsub,numchan,worklen,cmd->downsamp,cmd->numdms); 
+
+	//dm_gpu(numchan, worklen, downsamp, numdms, currentdsdata, lastdsdata, dsworklen, nsub, offsets, outdata);
+	float kernel_time = 0;
+	float t1 = clock();
+	dm_gpu(numchan, worklen, cmd->downsamp, cmd->numdms, currentdsdata, lastdsdata, dsworklen, cmd->nsub, offsets, outdata, &kernel_time);
+	float t2 = clock();
+	float t = (t2-t1)/CLOCKS_PER_SEC;
+	// printf("\n\nkernel time = %.4f  sum time = %.4f\n\n",kernel_time,t); 
+}
+
+
+
    } else {
-      /* Input format is sub1[0], sub2[0], sub3[0], ..., sub1[1], sub2[1], sub3[1], ... */
+      // Input format is sub1[0], sub2[0], sub3[0], ..., sub1[1], sub2[1], sub3[1], ... 
       float infloat;
       for (ii = 0; ii < cmd->nsub; ii++) {
          for (jj = 0; jj < dsworklen; jj++) {
@@ -1181,6 +1315,7 @@ static int get_data(FILE * infiles[], int numfiles, float **outdata,
          }
       }
    }
+
    SWAP(currentdata, lastdata);
    SWAP(currentdsdata, lastdsdata);
    if (totnumread != worklen) {
